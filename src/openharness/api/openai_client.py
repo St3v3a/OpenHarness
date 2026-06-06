@@ -317,16 +317,24 @@ class OpenAICompatibleClient:
             "model": request.model,
             "messages": openai_messages,
             "stream": True,
+            # include_usage appends a final usage-only chunk so we can record
+            # input/output tokens (→ cost + schema-share telemetry). It is
+            # ORTHOGONAL to reasoning/thinking mode — it only asks the API to
+            # summarise token counts. AIWorks 2026-06-06: this key used to be
+            # dropped whenever tools were present, which zeroed token usage on
+            # EVERY investigation turn (all turns carry the tool registry) and
+            # left investigation.prompt_tokens=0 in v3 telemetry. Keep it on
+            # for the gpt-5.x / openai-apim path v3 uses.
             "stream_options": {"include_usage": True},
         }
         params.update(_token_limit_param_for_model(request.model, request.max_tokens))
         if openai_tools:
             params["tools"] = openai_tools
-            # Some providers (Kimi) error on empty reasoning_content in
-            # tool-call follow-ups.  Omit the entire stream_options key if
-            # tools are present – avoids triggering model-side thinking mode
-            # that requires reasoning_content on every assistant message.
-            params.pop("stream_options", None)
+            # NOTE: a previous workaround dropped stream_options here because a
+            # Kimi-class provider errored on empty reasoning_content in
+            # tool-call follow-ups. That concern is about reasoning_content, not
+            # include_usage — if such a provider is ever reintroduced, gate the
+            # drop by model name rather than blanket-removing usage tracking.
 
         # Collect full response while streaming text deltas
         collected_content = ""

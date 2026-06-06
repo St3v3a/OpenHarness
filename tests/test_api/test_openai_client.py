@@ -359,6 +359,41 @@ class TestStreamMessageTokenParams:
         assert "max_tokens" in fake_sdk.chat.completions.last_kwargs
         assert "max_completion_tokens" not in fake_sdk.chat.completions.last_kwargs
 
+    @pytest.mark.asyncio
+    async def test_stream_keeps_include_usage_when_tools_present(self):
+        """Regression (AIWorks 2026-06-06): stream_options.include_usage MUST
+        stay set even when tools are present. Every investigation turn carries
+        the tool registry, so dropping it zeroed token usage on every turn
+        (investigation.prompt_tokens=0 in v3 telemetry). The usage-only chunk
+        must also flow through to ApiMessageCompleteEvent.usage."""
+        client = OpenAICompatibleClient(api_key="test-key")
+        fake_sdk = _FakeOpenAIClient()
+        client._client = fake_sdk
+
+        request = ApiMessageRequest(
+            model="gpt-5.4",
+            messages=[ConversationMessage.from_user_text("why are requests failing?")],
+            tools=[
+                {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+        )
+
+        events = [event async for event in client.stream_message(request)]
+
+        kwargs = fake_sdk.chat.completions.last_kwargs
+        assert kwargs is not None
+        assert "tools" in kwargs
+        assert kwargs.get("stream_options") == {"include_usage": True}
+        # Usage from the usage-only chunk must reach the completion event.
+        complete = [e for e in events if type(e).__name__ == "ApiMessageCompleteEvent"]
+        assert complete, "expected an ApiMessageCompleteEvent"
+        assert complete[0].usage.input_tokens == 11
+        assert complete[0].usage.output_tokens == 7
+
 
 class TestStripThinkBlocks:
     """Unit tests for the _strip_think_blocks streaming helper."""
