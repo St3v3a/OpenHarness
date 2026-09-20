@@ -40,21 +40,30 @@ log = logging.getLogger(__name__)
 MAX_RETRIES = 3
 BASE_DELAY = 1.0
 MAX_DELAY = 30.0
-_MAX_COMPLETION_TOKEN_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+# Models that still need the legacy ``max_tokens`` field. Everything from the
+# gpt-5 generation onward, and every o-series reasoning model, rejects it with
+# "Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens'". A
+# prefix allow-list ("gpt-5", ...) silently broke on the first gpt-6 deployment
+# (2026-09-20, gpt-6-astra), so the rule is now generation-based: parse the
+# major version and compare, instead of enumerating names.
+_GPT_GENERATION = re.compile(r"^gpt-(\d+)")
+_FIRST_MAX_COMPLETION_TOKENS_GENERATION = 5
 
 
 def _token_limit_param_for_model(model: str, max_tokens: int) -> dict[str, int]:
     """Return the correct token limit field for the target OpenAI model.
 
-    GPT-5 and the current reasoning-model families reject ``max_tokens`` and
-    require ``max_completion_tokens`` instead.
+    ``max_tokens`` only for gpt generations before 5 (gpt-3.x, gpt-4.x);
+    ``max_completion_tokens`` for gpt-5 and later, the o-series, and any
+    name we cannot classify (it is the current API field).
     """
     normalized = model.strip().lower()
     if "/" in normalized:
         normalized = normalized.rsplit("/", 1)[-1]
-    if normalized.startswith(_MAX_COMPLETION_TOKEN_MODEL_PREFIXES):
-        return {"max_completion_tokens": max_tokens}
-    return {"max_tokens": max_tokens}
+    m = _GPT_GENERATION.match(normalized)
+    if m and int(m.group(1)) < _FIRST_MAX_COMPLETION_TOKENS_GENERATION:
+        return {"max_tokens": max_tokens}
+    return {"max_completion_tokens": max_tokens}
 
 
 def _convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

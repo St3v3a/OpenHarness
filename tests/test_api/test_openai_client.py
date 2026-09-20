@@ -216,6 +216,13 @@ class TestTokenLimitParams:
 
     def test_legacy_chat_models_keep_max_tokens(self):
         assert _token_limit_param_for_model("gpt-4o", 4096) == {"max_tokens": 4096}
+        # Generation rule, not a name list: gpt-6+ and unknown names take the
+        # current field; only gpt-3/gpt-4 keep the legacy one.
+        assert _token_limit_param_for_model("gpt-6-astra", 4096) == {"max_completion_tokens": 4096}
+        assert _token_limit_param_for_model("gpt-7", 4096) == {"max_completion_tokens": 4096}
+        assert _token_limit_param_for_model("GPT-4.1-mini", 4096) == {"max_tokens": 4096}
+        assert _token_limit_param_for_model("o5-preview", 4096) == {"max_completion_tokens": 4096}
+        assert _token_limit_param_for_model("some-future-model", 4096) == {"max_completion_tokens": 4096}
 
 
 class _FakeUsage:
