@@ -654,6 +654,18 @@ async def handle_line(
             args,
             command_context,
         )
+        from openharness.ui.session_lifecycle import apply_session_intent
+        async def save_session():
+            bundle.session_backend.save_snapshot(
+                cwd=bundle.cwd, model=bundle.engine.model, system_prompt=bundle.engine.system_prompt,
+                messages=bundle.engine.messages, usage=bundle.engine.total_usage,
+                session_id=bundle.session_id, tool_metadata=bundle.engine.tool_metadata,
+            )
+        await apply_session_intent(bundle, result, save=save_session, rebuild_prompt=lambda: build_runtime_system_prompt(
+            bundle.current_settings(), cwd=bundle.cwd, extra_skill_dirs=bundle.extra_skill_dirs,
+            extra_plugin_roots=bundle.extra_plugin_roots, include_project_memory=bundle.include_project_memory,
+        ))
+        sync_app_state(bundle)
         if result.refresh_runtime:
             refresh_runtime_client(bundle)
         await _render_command_result(result, print_system, clear_output, render_event)

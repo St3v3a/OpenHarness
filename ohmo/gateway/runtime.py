@@ -204,6 +204,9 @@ class OhmoSessionRuntimePool:
         )
         if snapshot and snapshot.get("session_id"):
             bundle.session_id = str(snapshot["session_id"])
+            bundle.engine.tool_metadata["session_id"] = bundle.session_id
+            from openharness.api.usage import UsageSnapshot
+            bundle.engine.restore_usage(UsageSnapshot.model_validate(snapshot.get("usage") or {}))
         self._register_gateway_tools(bundle)
         await start_runtime(bundle)
         bundle.engine.set_system_prompt(self._runtime_system_prompt(bundle, latest_user_prompt))
@@ -328,6 +331,11 @@ class OhmoSessionRuntimePool:
         user_prompt: str,
         result,
     ):
+        from openharness.ui.session_lifecycle import apply_session_intent
+        async def save_session():
+            await self._save_snapshot(bundle, session_key, "")
+        await apply_session_intent(bundle, result, save=save_session,
+                                   rebuild_prompt=lambda: self._runtime_system_prompt(bundle, ""), session_key=session_key)
         if result.refresh_runtime:
             bundle = await self._refresh_bundle(session_key, bundle, user_prompt)
 

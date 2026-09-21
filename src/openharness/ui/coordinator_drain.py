@@ -65,7 +65,10 @@ async def wait_for_completed_async_agent_entries(
     poll_interval_seconds: float = 0.1,
 ) -> list[dict[str, object]]:
     manager = get_task_manager()
+    generation = (tool_metadata or {}).get("session_generation", 0)
     while True:
+        if (tool_metadata or {}).get("session_generation", 0) != generation:
+            return []
         pending = pending_async_agent_entries(tool_metadata)
         if not pending:
             return []
@@ -175,7 +178,10 @@ async def drain_coordinator_async_agents(
     engine = getattr(bundle, "engine", None)
     if engine is None:
         return
+    generation = (getattr(engine, "tool_metadata", None) or {}).get("session_generation", 0)
     while True:
+        if (getattr(engine, "tool_metadata", None) or {}).get("session_generation", 0) != generation:
+            return
         pending = pending_async_agent_entries(getattr(engine, "tool_metadata", None))
         if not pending:
             return
@@ -186,6 +192,8 @@ async def drain_coordinator_async_agents(
         completed = await wait_for_completed_async_agent_entries(
             getattr(engine, "tool_metadata", None)
         )
+        if (getattr(engine, "tool_metadata", None) or {}).get("session_generation", 0) != generation:
+            return
         notification_payload = format_completed_task_notifications(completed)
         if not notification_payload.strip():
             return

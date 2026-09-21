@@ -151,6 +151,15 @@ def build_runtime_system_prompt(
     if local_rules:
         sections.append(f"# Local Environment Rules\n\n{local_rules}")
 
+    from openharness.prompts.runtime_prompt import RuntimePrompt
+    # Environment (including date/branch) belongs after the stable instructions.
+    dynamic_sections = []
+    marker = "\n\n# Environment"
+    if marker in sections[0]:
+        sections[0], environment = sections[0].split(marker, 1)
+        dynamic_sections.append("# Environment" + environment)
+    stable_instructions = "\n\n".join(section for section in sections if section.strip())
+    sections = dynamic_sections
     for title, path in (
         ("Issue Context", get_project_issue_file(cwd)),
         ("Pull Request Comments", get_project_pr_comments_file(cwd)),
@@ -184,4 +193,4 @@ def build_runtime_system_prompt(
                     pass
                 sections.append(format_relevant_memories(relevant))
 
-    return "\n\n".join(section for section in sections if section.strip())
+    return RuntimePrompt(stable_instructions, "\n\n".join(section for section in sections if section.strip()))

@@ -30,7 +30,7 @@ from openharness.bridge.types import WorkSecret
 from openharness.bridge.work_secret import build_sdk_url, decode_work_secret, encode_work_secret
 from openharness.api.provider import auth_status, detect_provider
 from openharness.config.settings import Settings, display_model_setting, load_settings, save_settings
-from openharness.engine.messages import ConversationMessage, sanitize_conversation_messages
+from openharness.engine.messages import ConversationMessage
 from openharness.engine.query_engine import QueryEngine
 from openharness.memory import (
     add_memory_entry,
@@ -99,6 +99,18 @@ if TYPE_CHECKING:
     from openharness.tools.base import ToolRegistry
 
 
+
+def _context_cost_status(engine):
+    if engine.model != "gpt-6-astra":
+        return ""
+    from openharness.engine.context_cost import ContextCostPolicy
+    policy = ContextCostPolicy.from_env()
+    estimated = engine.estimate_next_input_tokens()
+    if estimated is None:
+        estimated = "not available for this client"
+    return f"Next input estimate: {estimated}; advisory={policy.advisory}, compact={policy.compact}, hard={policy.hard}"
+
+
 @dataclass
 class CommandResult:
     """Result returned by a slash command."""
@@ -112,6 +124,11 @@ class CommandResult:
     refresh_runtime: bool = False
     submit_prompt: str | None = None
     submit_model: str | None = None
+    start_new_session: bool = False
+    new_session_prompt: str | None = None
+    force_new_session: bool = False
+    resume_session_id: str | None = None
+    session_reason: str = "slash_new"
 
 
 @dataclass(frozen=True)
@@ -456,9 +473,20 @@ def create_default_command_registry(
         del context
         return CommandResult(should_exit=True)
 
-    async def _clear_handler(_: str, context: CommandContext) -> CommandResult:
-        context.engine.clear()
-        return CommandResult(message="Conversation cleared.", clear_screen=True)
+    async def _new_handler(args: str, context: CommandContext) -> CommandResult:
+        prompt = args.strip()
+        force = prompt == "--force" or prompt.startswith("--force ")
+        if force:
+            prompt = prompt[len("--force"):].strip()
+        elif prompt.startswith("--"):
+            return CommandResult(message="Usage: /new [--force] [PROMPT]")
+        return CommandResult(start_new_session=True, force_new_session=force,
+                             new_session_prompt=prompt or None, clear_screen=True)
+
+    async def _clear_handler(args: str, context: CommandContext) -> CommandResult:
+        result = await _new_handler(args, context)
+        result.session_reason = "slash_clear"
+        return result
 
     async def _status_handler(_: str, context: CommandContext) -> CommandResult:
         usage = context.engine.total_usage
@@ -467,6 +495,7 @@ def create_default_command_registry(
         return CommandResult(
             message=(
                 f"Messages: {len(context.engine.messages)}\n"
+                f"{_context_cost_status(context.engine)}\n"
                 f"Usage: input={usage.input_tokens} output={usage.output_tokens}\n"
                 f"Profile: {manager.get_active_profile()}\n"
                 f"Effort: {state.effort if state is not None else load_settings().effort}\n"
@@ -533,6 +562,7 @@ def create_default_command_registry(
             message=(
                 f"Actual usage: input={usage.input_tokens} output={usage.output_tokens}\n"
                 f"Estimated conversation tokens: {estimated}\n"
+                f"{_context_cost_status(context.engine)}\n"
                 f"Messages: {len(context.engine.messages)}"
             )
         )
@@ -541,6 +571,19 @@ def create_default_command_registry(
         usage = context.engine.total_usage
         model = context.app_state.get().model if context.app_state is not None else load_settings().model
         estimated_cost = "unavailable"
+        if context.engine.model == "gpt-6-astra":
+            hit_rate = usage.cached_input_tokens / usage.input_tokens if usage.input_tokens else 0
+            return CommandResult(message=(
+                f"Ordinary input tokens: {usage.ordinary_input_tokens}\n"
+                f"Cached input tokens: {usage.cached_input_tokens}\n"
+                f"Cache-write input tokens: {usage.cache_write_input_tokens}\n"
+                f"Output tokens (including reasoning): {usage.output_tokens}\n"
+                f"Reasoning output tokens: {usage.reasoning_output_tokens}\n"
+                f"Cache-hit rate: {hit_rate:.1%}\n"
+                f"Estimated cost: ${usage.estimated_cost_usd:.6f}\n"
+                f"Estimated savings: ${usage.estimated_uncached_cost_usd - usage.estimated_cost_usd:.6f}\n"
+                f"Elevated-price turns: {usage.elevated_price_turns}"
+            ))
         if model.startswith("claude-3-5-sonnet"):
             estimated = (usage.input_tokens * 3.0 + usage.output_tokens * 15.0) / 1_000_000
             estimated_cost = f"${estimated:.4f} (estimated)"
@@ -805,16 +848,7 @@ def create_default_command_registry(
             snapshot = context.session_backend.load_by_id(context.cwd, sid)
             if snapshot is None:
                 return CommandResult(message=f"Session not found: {sid}")
-            messages = sanitize_conversation_messages(
-                [ConversationMessage.model_validate(item) for item in snapshot.get("messages", [])]
-            )
-            context.engine.load_messages(messages)
-            summary = snapshot.get("summary", "")[:60]
-            return CommandResult(
-                message=f"Restored {len(messages)} messages from session {sid}"
-                + (f" ({summary})" if summary else ""),
-                replay_messages=messages,
-            )
+            return CommandResult(resume_session_id=sid)
 
         # /resume — list sessions (for the TUI to show a picker)
         sessions = context.session_backend.list_snapshots(context.cwd, limit=10)
@@ -823,14 +857,7 @@ def create_default_command_registry(
             snapshot = context.session_backend.load_latest(context.cwd)
             if snapshot is None:
                 return CommandResult(message="No saved sessions found for this project.")
-            messages = sanitize_conversation_messages(
-                [ConversationMessage.model_validate(item) for item in snapshot.get("messages", [])]
-            )
-            context.engine.load_messages(messages)
-            return CommandResult(
-                message=f"Restored {len(messages)} messages from the latest session.",
-                replay_messages=messages,
-            )
+            return CommandResult(resume_session_id=snapshot.get("session_id") or "latest")
 
         # Format session list for display / picker
         import time
@@ -2321,7 +2348,8 @@ def create_default_command_registry(
     registry.register(
         SlashCommand("exit", "Exit OpenHarness", _exit_handler, aliases=("quit",))
     )
-    registry.register(SlashCommand("clear", "Clear conversation history", _clear_handler))
+    registry.register(SlashCommand("new", "Start a new session, optionally with a prompt", _new_handler))
+    registry.register(SlashCommand("clear", "Start a new session (alias for /new)", _clear_handler))
     registry.register(SlashCommand("version", "Show the installed OpenHarness version", _version_handler))
     registry.register(SlashCommand("status", "Show session status", _status_handler))
     registry.register(SlashCommand("context", "Show the active runtime system prompt", _context_handler))

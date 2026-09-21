@@ -46,6 +46,7 @@ class ApiMessageRequest:
     max_tokens: int = 4096
     tools: list[dict[str, Any]] = field(default_factory=list)
     effort: str | None = None
+    dynamic_context: str = ""
 
 
 @dataclass(frozen=True)

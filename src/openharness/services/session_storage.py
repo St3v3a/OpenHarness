@@ -98,11 +98,11 @@ def save_session_snapshot(
 
     # Save as latest
     latest_path = session_dir / "latest.json"
-    atomic_write_text(latest_path, data)
 
     # Save by session ID
     session_path = session_dir / f"session-{sid}.json"
     atomic_write_text(session_path, data)
+    atomic_write_text(latest_path, data)
 
     return latest_path
 

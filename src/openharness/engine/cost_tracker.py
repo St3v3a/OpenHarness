@@ -13,10 +13,13 @@ class CostTracker:
 
     def add(self, usage: UsageSnapshot) -> None:
         """Add a usage snapshot to the running total."""
-        self._usage = UsageSnapshot(
-            input_tokens=self._usage.input_tokens + usage.input_tokens,
-            output_tokens=self._usage.output_tokens + usage.output_tokens,
-        )
+        self._usage = UsageSnapshot(**{
+            name: getattr(self._usage, name) + getattr(usage, name)
+            for name in UsageSnapshot.model_fields
+        })
+
+    def restore(self, usage: UsageSnapshot) -> None:
+        self._usage = usage.model_copy(deep=True)
 
     @property
     def total(self) -> UsageSnapshot:

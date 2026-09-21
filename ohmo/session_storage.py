@@ -77,11 +77,11 @@ def save_session_snapshot(
     }
     data = json.dumps(payload, indent=2) + "\n"
     latest_path = session_dir / "latest.json"
+    session_path = session_dir / f"session-{sid}.json"
+    atomic_write_text(session_path, data)
     atomic_write_text(latest_path, data)
     if session_key:
         atomic_write_text(_session_key_latest_path(workspace, session_key), data)
-    session_path = session_dir / f"session-{sid}.json"
-    atomic_write_text(session_path, data)
     return latest_path
 
 

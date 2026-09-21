@@ -647,6 +647,12 @@ async def run_query(
         auto_compact_if_needed,
     )
 
+    from openharness.engine.context_cost import ContextCostPolicy
+    cost_policy = ContextCostPolicy.from_env() if context.model == "gpt-6-astra" else None
+    estimate_request = getattr(context.api_client, "estimate_request_tokens", None)
+    def next_request():
+        return ApiMessageRequest(model=context.model, messages=messages, system_prompt=context.system_prompt,
+                                 max_tokens=effective_max_tokens, tools=context.tool_registry.to_api_schema(), effort=context.effort)
     compact_state = AutoCompactState()
     reactive_compact_attempted = False
     last_compaction_result: tuple[list[ConversationMessage], bool] = (messages, False)
@@ -680,7 +686,7 @@ async def run_query(
                 hook_executor=context.hook_executor,
                 carryover_metadata=context.tool_metadata,
                 context_window_tokens=context.context_window_tokens,
-                auto_compact_threshold_tokens=context.auto_compact_threshold_tokens,
+                auto_compact_threshold_tokens=(120_000 if cost_policy and force else cost_policy.compact if cost_policy else context.auto_compact_threshold_tokens),
             )
         )
         while True:
@@ -709,11 +715,26 @@ async def run_query(
                 )
             ), None
         # --- auto-compact check before calling the model ---------------
-        async for event, usage in _stream_compaction(trigger="auto"):
+        estimated = estimate_request(next_request()) if callable(estimate_request) and cost_policy else None
+        force_cost_compact = estimated is not None and estimated >= cost_policy.compact
+        if estimated is not None:
+            context.tool_metadata["context_estimated_tokens"] = estimated
+            context.tool_metadata["compaction_trigger"] = "automatic" if force_cost_compact else "advisory" if estimated >= cost_policy.advisory else "none"
+            if estimated >= cost_policy.advisory:
+                yield StatusEvent(message=f"Estimated next input: {estimated} tokens; consider /compact or /new."), None
+        async for event, usage in _stream_compaction(trigger="auto", force=force_cost_compact):
             yield event, usage
         compacted_messages, was_compacted = last_compaction_result
         if compacted_messages is not messages:
             messages[:] = compacted_messages
+        if estimated is not None:
+            estimated = estimate_request(next_request())
+            context.tool_metadata["context_estimated_tokens"] = estimated
+            if compact_state.consecutive_failures >= 3 or (estimated >= cost_policy.hard and not cost_policy.allow_elevated):
+                yield ErrorEvent(message="Context cost guard: use /new; compaction could not safely reduce the request."), None
+                return
+            if estimated >= cost_policy.hard:
+                yield StatusEvent(message="Elevated-price override enabled for this request."), None
         # ---------------------------------------------------------------
 
         # --- image preprocessing: convert ImageBlocks to text for non-vision models ---
@@ -750,6 +771,13 @@ async def run_query(
                 if isinstance(event, ApiMessageCompleteEvent):
                     final_message = event.message
                     usage = event.usage
+                    if context.model == "gpt-6-astra":
+                        try:
+                            from aiworks_harness.telemetry.exporter import record_provider_usage
+                        except ImportError:
+                            pass  # standalone vendored CLI has no AIWorks exporter
+                        else:
+                            record_provider_usage(usage, model=context.model, metadata=context.tool_metadata)
         except Exception as exc:
             error_msg = str(exc)
             if _is_completion_token_limit_error(exc):

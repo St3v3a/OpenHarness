@@ -468,7 +468,7 @@ async def test_runtime_pool_restores_messages_for_private_legacy_session_key(tmp
     async def fake_build_runtime(**kwargs):
         captured["restore_messages"] = kwargs.get("restore_messages")
         return SimpleNamespace(
-            engine=SimpleNamespace(set_system_prompt=lambda prompt: None, messages=[]),
+            engine=SimpleNamespace(set_system_prompt=lambda prompt: None, messages=[], tool_metadata={}, restore_usage=lambda usage: None),
             session_id="newsession",
         )
 
@@ -576,7 +576,7 @@ async def test_runtime_pool_uses_managed_group_cwd_binding(tmp_path, monkeypatch
     async def fake_build_runtime(**kwargs):
         captured["cwd"] = kwargs.get("cwd")
         return SimpleNamespace(
-            engine=SimpleNamespace(set_system_prompt=lambda prompt: None, messages=[]),
+            engine=SimpleNamespace(set_system_prompt=lambda prompt: None, messages=[], tool_metadata={}, restore_usage=lambda usage: None),
             session_id="newsession",
         )
 
@@ -623,7 +623,7 @@ async def test_runtime_pool_restores_messages_for_group_sender_scoped_session_ke
     async def fake_build_runtime(**kwargs):
         captured["restore_messages"] = kwargs.get("restore_messages")
         return SimpleNamespace(
-            engine=SimpleNamespace(set_system_prompt=lambda prompt: None, messages=[]),
+            engine=SimpleNamespace(set_system_prompt=lambda prompt: None, messages=[], tool_metadata={}, restore_usage=lambda usage: None),
             session_id="newsession",
         )
 
@@ -660,7 +660,7 @@ async def test_runtime_pool_does_not_restore_other_group_sender_session_key(tmp_
     async def fake_build_runtime(**kwargs):
         captured["restore_messages"] = kwargs.get("restore_messages")
         return SimpleNamespace(
-            engine=SimpleNamespace(set_system_prompt=lambda prompt: None, messages=[]),
+            engine=SimpleNamespace(set_system_prompt=lambda prompt: None, messages=[], tool_metadata={}, restore_usage=lambda usage: None),
             session_id="newsession",
         )
 

@@ -18,6 +18,20 @@ from openharness.services.autodream.service import schedule_auto_dream
 from openharness.tools.base import ToolRegistry
 
 
+
+def _serialized_turn(method):
+    async def run(self, *args, **kwargs):
+        if getattr(self, "_busy", False):
+            raise RuntimeError("Session is busy")
+        self._busy = True
+        try:
+            async for event in method(self, *args, **kwargs):
+                yield event
+        finally:
+            self._busy = False
+    return run
+
+
 class QueryEngine:
     """Owns conversation history and the tool-aware model loop."""
 
@@ -98,6 +112,18 @@ class QueryEngine:
         """Clear the in-memory conversation history."""
         self._messages.clear()
         self._cost_tracker = CostTracker()
+
+    def estimate_next_input_tokens(self):
+        from openharness.api.client import ApiMessageRequest
+        estimate = getattr(self._api_client, "estimate_request_tokens", None)
+        if not callable(estimate):
+            return None
+        return estimate(ApiMessageRequest(model=self._model, messages=self._messages,
+            system_prompt=self._system_prompt, tools=self._tool_registry.to_api_schema(),
+            max_tokens=self._max_tokens, effort=self._effort))
+
+    def restore_usage(self, usage) -> None:
+        self._cost_tracker.restore(usage)
 
     def set_system_prompt(self, prompt: str) -> None:
         """Update the active system prompt for future turns."""
@@ -224,6 +250,7 @@ class QueryEngine:
             return bool(msg.tool_uses)
         return False
 
+    @_serialized_turn
     async def submit_message(self, prompt: str | ConversationMessage) -> AsyncIterator[StreamEvent]:
         """Append a user message and execute the query loop."""
         user_message = (
@@ -277,6 +304,7 @@ class QueryEngine:
             await self._extract_durable_memories()
             self._schedule_auto_dream()
 
+    @_serialized_turn
     async def continue_pending(self, *, max_turns: int | None = None) -> AsyncIterator[StreamEvent]:
         """Continue an interrupted tool loop without appending a new user message."""
         self._prepare_session_memory()
