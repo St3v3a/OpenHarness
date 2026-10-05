@@ -5,66 +5,84 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
 from pydantic import BaseModel, model_validator
 
 logger = logging.getLogger(__name__)
 
-# Conservative per-1M-token fallback, used for gpt-6-astra (rates dated
-# 2026-09-21) and for any priced model before its rates take effect.
-CONSERVATIVE_INPUT_RATE, CONSERVATIVE_OUTPUT_RATE = 10.0, 50.0
+# Input tokens above this are billed in the long-context band.
+LONG_CONTEXT_THRESHOLD = 272_000
+
+
+@dataclass(frozen=True)
+class Band:
+    """USD per 1,000,000 tokens for one context band."""
+    input: float
+    cached_input: float
+    cache_write: float
+    output: float
 
 
 @dataclass(frozen=True)
 class ModelRates:
-    """Short-context per-1M-token rates for one model version. Cache reads and
-    writes are priced as a ratio of ``input`` (so an INVESTIGATION_COST_PER_M_*
-    override keeps the model's cache structure). Above 272,000 input tokens the
-    long-context band charges 2x input / 1.5x output. ``effective_from``
-    mirrors the dev1 model_pricing row; before a model's first version the
-    conservative fallback applies."""
-    input: float
-    output: float
-    cache_read_ratio: float = 0.1
-    cache_write_ratio: float = 1.25
-    effective_from: date | None = None
+    short: Band
+    long: Band
 
 
-# Versions per model, oldest first; the latest with effective_from <= today wins.
-PRICED_MODELS: dict[str, tuple[ModelRates, ...]] = {
-    "gpt-6-astra": (ModelRates(CONSERVATIVE_INPUT_RATE, CONSERVATIVE_OUTPUT_RATE),),
-    "gpt-6.1-sol": (
-        # 2026-10-06 only: Azure Retail EUR westeurope Global Standard short-
-        # context "6-sol" meters (cache read 0.176, write 2.1999), on the
-        # assumption 6.1-sol bills like 6-sol. Receipt
-        # output/2026-10-05-sol-westeurope-eur-source.json.
-        ModelRates(1.7599, 8.7997, 0.1, 1.25, effective_from=date(2026, 10, 6)),
-        # From 2026-10-07: Azure OpenAI pricing page
-        # (https://azure.microsoft.com/en-us/pricing/details/azure-openai/),
-        # "GPT-6.1 Sol (short context) Global", europe-west, USD 2.00 input /
-        # 0.10 cached input / 2.50 cache writes / 10.00 output per 1M, converted
-        # at the ECB reference rate for 2026-10-02 (1.1225 USD per EUR) to EUR
-        # 1.781737 / 0.089087 / 2.227171 / 8.908686. Cached input is 0.05x input
-        # (astra is 0.1x). The page's long-context row (4.00 / 15.00) matches the
-        # 2x / 1.5x band; the 272k boundary itself is astra's and is not stated
-        # for sol. Receipt output/2026-10-05-gpt-6.1-sol-pricing-page-source.json.
-        ModelRates(1.781737, 8.908686, 0.05, 1.25, effective_from=date(2026, 10, 7)),
-    ),
+# Session-budget prices in USD (the budget and estimated_cost_usd are USD).
+# Billing is separate: the EUR rows in model_pricing are not read here.
+# Source for both: the Azure OpenAI pricing page
+# (https://azure.microsoft.com/en-us/pricing/details/azure-openai/), Global
+# rows, native USD; receipt output/2026-10-05-gpt-6.1-sol-pricing-page-source.json.
+PRICED_MODELS: dict[str, ModelRates] = {
+    # Unchanged from the 2026-09-21 rates (10 / 50, cached 0.1x, write 1.25x,
+    # long band 2x input / 1.5x output), which the page's astra rows match.
+    "gpt-6-astra": ModelRates(short=Band(10.00, 1.00, 12.50, 50.00),
+                              long=Band(20.00, 2.00, 25.00, 75.00)),
+    # "GPT-6.1 Sol (short/long context) Global". The 272k boundary is
+    # astra's; the page does not state sol's.
+    "gpt-6.1-sol": ModelRates(short=Band(2.00, 0.10, 2.50, 10.00),
+                              long=Band(4.00, 0.20, 5.00, 15.00)),
 }
 
+# Fallback for models not in PRICED_MODELS (SessionBudget's flat path).
+CONSERVATIVE_INPUT_RATE, CONSERVATIVE_OUTPUT_RATE = 10.0, 50.0
 
-def rates_for(model: str, today: date | None = None) -> ModelRates:
-    """The model's rates in force on ``today`` (UTC), else the conservative fallback."""
-    day = today or _utc_today()
-    current = None
-    for version in PRICED_MODELS.get(model, ()):
-        if version.effective_from is None or version.effective_from <= day:
-            current = version
-    return current or ModelRates(CONSERVATIVE_INPUT_RATE, CONSERVATIVE_OUTPUT_RATE)
+_RATE_ENV = {"input": "INVESTIGATION_COST_PER_M_INPUT", "output": "INVESTIGATION_COST_PER_M_OUTPUT"}
 
 
-def _utc_today() -> date:
-    return datetime.now(timezone.utc).date()
+def env_rate(name: str) -> float | None:
+    """A per-1M rate override from the environment, or None when unset.
+
+    Non-numeric or 0 falls back (None) with a warning; NaN, infinity or a
+    negative value raises ValueError so a bad deploy fails at startup.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; ignoring it", name, raw)
+        return None
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be finite and nonnegative")
+    if value == 0:
+        logger.warning("%s=0 would price every token at zero; ignoring it", name)
+        return None
+    return value
+
+
+def scaled_band(band: Band, input_rate: float | None, output_rate: float | None) -> Band:
+    """``band`` with input/output replaced by the given rates. Cached and
+    cache-write input keep their ratio to input, so an override keeps the
+    model's cache structure."""
+    factor = (input_rate / band.input) if input_rate is not None else 1.0
+    return Band(
+        input=band.input * factor,
+        cached_input=band.cached_input * factor,
+        cache_write=band.cache_write * factor,
+        output=output_rate if output_rate is not None else band.output,
+    )
 
 
 class UsageSnapshot(BaseModel):
@@ -100,29 +118,46 @@ class UsageSnapshot(BaseModel):
         return self.input_tokens + self.output_tokens
 
     def price_astra(self) -> "UsageSnapshot":
-        """Price one request, never an aggregated session. Rates dated 2026-09-21."""
+        """Price one request, never an aggregated session."""
         return self.price_for_model("gpt-6-astra")
 
-    def price_for_model(self, model: str, *, today: date | None = None) -> "UsageSnapshot":
-        """Price one request on ``model``'s PRICED_MODELS rates.
+    def price_for_model(
+        self, model: str, *, input_rate: float | None = None, output_rate: float | None = None,
+    ) -> "UsageSnapshot":
+        """Price one request on ``model``'s PRICED_MODELS rates, in USD.
 
-        INVESTIGATION_COST_PER_M_INPUT/OUTPUT, when set, override the rates for
-        every model. A model not in PRICED_MODELS, or priced but not yet
-        effective, uses the conservative fallback.
+        ``input_rate``/``output_rate`` (else INVESTIGATION_COST_PER_M_INPUT /
+        _OUTPUT) replace the short-band base rates; the long band scales by
+        the same factor. Raises KeyError for a model not in PRICED_MODELS.
         """
-        rates = rates_for(model, today)
-        input_rate = float(os.getenv("INVESTIGATION_COST_PER_M_INPUT") or rates.input)
-        output_rate = float(os.getenv("INVESTIGATION_COST_PER_M_OUTPUT") or rates.output)
-        if not all(math.isfinite(rate) and rate >= 0 for rate in (input_rate, output_rate)):
-            raise ValueError("Pricing rates must be finite and nonnegative")
-        elevated = self.input_tokens > 272_000
-        input_multiplier, output_multiplier = (2, 1.5) if elevated else (1, 1)
+        rates = PRICED_MODELS[model]
+        if input_rate is None:
+            input_rate = env_rate(_RATE_ENV["input"])
+        if output_rate is None:
+            output_rate = env_rate(_RATE_ENV["output"])
+        for rate in (input_rate, output_rate):
+            if rate is not None and (not math.isfinite(rate) or rate < 0):
+                raise ValueError("Pricing rates must be finite and nonnegative")
+        in_factor = input_rate / rates.short.input if input_rate is not None else None
+        out_factor = output_rate / rates.short.output if output_rate is not None else None
+        elevated = self.input_tokens > LONG_CONTEXT_THRESHOLD
+        band = rates.long if elevated else rates.short
+        band = scaled_band(
+            band,
+            band.input * in_factor if in_factor is not None else None,
+            band.output * out_factor if out_factor is not None else None,
+        )
+        # Missing cache details: charge ordinary input at the cache-write rate
+        # (conservative).
+        ordinary_rate = band.cache_write if self.cache_details_missing_turns else band.input
         self.estimated_cost_usd = (
-            (input_rate * (self.ordinary_input_tokens * (1.25 if self.cache_details_missing_turns else 1) + self.cached_input_tokens * rates.cache_read_ratio + self.cache_write_input_tokens * rates.cache_write_ratio)) * input_multiplier
-            + self.output_tokens * output_rate * output_multiplier
+            self.ordinary_input_tokens * ordinary_rate
+            + self.cached_input_tokens * band.cached_input
+            + self.cache_write_input_tokens * band.cache_write
+            + self.output_tokens * band.output
         ) / 1_000_000
         self.estimated_uncached_cost_usd = (
-            self.input_tokens * input_rate * input_multiplier + self.output_tokens * output_rate * output_multiplier
+            self.input_tokens * band.input + self.output_tokens * band.output
         ) / 1_000_000
         self.elevated_price_turns = int(elevated)
         return self

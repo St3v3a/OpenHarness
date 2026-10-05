@@ -1,7 +1,12 @@
-"""Local request-size policy for Astra's elevated-price boundary."""
+"""Local request-size policy for the 272k elevated-price boundary."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass
+
+# Models whose requests run through ContextCostPolicy (advisory / compact /
+# hard guard below the 272k long-context band). gpt-6.1-sol added 2026-10-05:
+# its long-context rows also price above a context boundary, taken as 272k.
+CONTEXT_GUARDED_MODELS: frozenset[str] = frozenset({"gpt-6-astra", "gpt-6.1-sol"})
 
 
 @dataclass(frozen=True)

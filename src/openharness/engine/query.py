@@ -647,8 +647,8 @@ async def run_query(
         auto_compact_if_needed,
     )
 
-    from openharness.engine.context_cost import ContextCostPolicy
-    cost_policy = ContextCostPolicy.from_env() if context.model == "gpt-6-astra" else None
+    from openharness.engine.context_cost import CONTEXT_GUARDED_MODELS, ContextCostPolicy
+    cost_policy = ContextCostPolicy.from_env() if context.model in CONTEXT_GUARDED_MODELS else None
     estimate_request = getattr(context.api_client, "estimate_request_tokens", None)
     def next_request():
         return ApiMessageRequest(model=context.model, messages=messages, system_prompt=context.system_prompt,
