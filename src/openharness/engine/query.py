@@ -19,7 +19,7 @@ from openharness.api.client import (
     SupportsStreamingMessages,
 )
 from openharness.api.provider import is_model_multimodal
-from openharness.api.usage import UsageSnapshot
+from openharness.api.usage import PRICED_MODELS, UsageSnapshot
 from openharness.config.paths import get_data_dir
 from openharness.engine.messages import (
     ConversationMessage,
@@ -771,7 +771,7 @@ async def run_query(
                 if isinstance(event, ApiMessageCompleteEvent):
                     final_message = event.message
                     usage = event.usage
-                    if context.model == "gpt-6-astra":
+                    if context.model in PRICED_MODELS:
                         try:
                             from aiworks_harness.telemetry.exporter import record_provider_usage
                         except ImportError:
