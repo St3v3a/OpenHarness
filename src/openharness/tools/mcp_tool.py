@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from mcp.shared.exceptions import McpError
 from pydantic import BaseModel, Field, create_model
 
 from openharness.mcp.client import McpClientManager, McpServerNotConnectedError
@@ -33,9 +34,14 @@ class McpToolAdapter(BaseTool):
             )
         except McpServerNotConnectedError as exc:
             # "origin": "client" marks an error this client built (no session,
-            # transport failure, call refused), as opposed to anything the tool
-            # returned. A host that verifies tool results can tell them apart.
-            return ToolResult(output=str(exc), is_error=True, metadata={"origin": "client"})
+            # transport failure, timeout), as opposed to text the server wrote.
+            # A JSON-RPC error response (McpError) carries the server's own
+            # message, so it is not marked. A host that verifies tool results
+            # can then tell the two apart.
+            from_server = isinstance(exc.__cause__, McpError)
+            return ToolResult(
+                output=str(exc), is_error=True, metadata={} if from_server else {"origin": "client"}
+            )
         return ToolResult(output=output)
 
 
