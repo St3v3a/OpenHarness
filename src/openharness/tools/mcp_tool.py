@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 
+import httpx
 from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
 from pydantic import BaseModel, Field, create_model
 
 from openharness.mcp.client import McpClientManager, McpServerNotConnectedError
@@ -33,16 +35,43 @@ class McpToolAdapter(BaseTool):
                 arguments.model_dump(mode="json", exclude_none=True),
             )
         except McpServerNotConnectedError as exc:
-            # "origin": "client" marks an error this client built (no session,
-            # transport failure, timeout), as opposed to text the server wrote.
-            # A JSON-RPC error response (McpError) carries the server's own
-            # message, so it is not marked. A host that verifies tool results
-            # can then tell the two apart.
-            from_server = isinstance(exc.__cause__, McpError)
+            reason = _client_failure_reason(exc)
             return ToolResult(
-                output=str(exc), is_error=True, metadata={} if from_server else {"origin": "client"}
+                output=str(exc), is_error=True, metadata={"client_error": reason} if reason else {}
             )
         return ToolResult(output=output)
+
+
+_SDK_ERROR_REASONS = {
+    httpx.codes.REQUEST_TIMEOUT.value: "timed out",
+    CONNECTION_CLOSED: "connection failed",
+}
+
+
+def _client_failure_reason(exc: McpServerNotConnectedError) -> str | None:
+    """A fixed phrase for a failure this client can vouch for, else None.
+
+    ``str(exc)`` may quote the server (a JSON-RPC error message, a status
+    detail) or the transport (the request URL). A host that verifies tool
+    results cannot treat that text as its own, so known client-side causes are
+    named here from the exception TYPE alone, and everything else, a JSON-RPC
+    error included, gets no reason and stays unverified text.
+    """
+    cause = exc.__cause__
+    if cause is None:
+        return "not connected"  # raised by the manager itself: no session
+    if isinstance(cause, McpError):
+        # The MCP SDK raises McpError for its own read timeout and for a closed
+        # connection as well as for a JSON-RPC error the server sent. Only the
+        # two codes are trusted; the message never is.
+        return _SDK_ERROR_REASONS.get(cause.error.code)
+    if isinstance(cause, (TimeoutError, httpx.TimeoutException)):
+        return "timed out"
+    if isinstance(cause, httpx.HTTPStatusError):
+        return f"HTTP {cause.response.status_code}"
+    if isinstance(cause, (httpx.TransportError, ConnectionError)):
+        return "connection failed"
+    return None
 
 
 _JSON_TYPE_MAP: dict[str, type] = {
