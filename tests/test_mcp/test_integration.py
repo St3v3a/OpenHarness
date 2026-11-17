@@ -25,8 +25,8 @@ class FakeMcpManager:
     def list_resources(self):
         return self.resources
 
-    async def call_tool(self, server_name: str, tool_name: str, arguments: dict):
-        return f"{server_name}:{tool_name}:{arguments['name']}"
+    async def call_tool_result(self, server_name: str, tool_name: str, arguments: dict):
+        return (f"{server_name}:{tool_name}:{arguments['name']}", False)
 
     async def read_resource(self, server_name: str, uri: str):
         return f"{server_name}:{uri}"

@@ -128,6 +128,12 @@ class McpClientManager:
 
     async def call_tool(self, server_name: str, tool_name: str, arguments: dict[str, Any]) -> str:
         """Invoke one MCP tool and stringify the result."""
+        return (await self.call_tool_result(server_name, tool_name, arguments))[0]
+
+    async def call_tool_result(
+        self, server_name: str, tool_name: str, arguments: dict[str, Any]
+    ) -> tuple[str, bool]:
+        """Invoke one MCP tool: ``(stringified result, the server's isError flag)``."""
         session = self._sessions.get(server_name)
         if session is None:
             status = self._statuses.get(server_name)
@@ -151,7 +157,7 @@ class McpClientManager:
             parts.append(str(result.structuredContent))
         if not parts:
             parts.append("(no output)")
-        return "\n".join(parts).strip()
+        return "\n".join(parts).strip(), bool(result.isError)
 
     async def read_resource(self, server_name: str, uri: str) -> str:
         """Read one MCP resource and stringify the response."""

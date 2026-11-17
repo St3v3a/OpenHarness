@@ -29,7 +29,7 @@ class McpToolAdapter(BaseTool):
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         del context
         try:
-            output = await self._manager.call_tool(
+            output, is_error = await self._manager.call_tool_result(
                 self._tool_info.server_name,
                 self._tool_info.name,
                 arguments.model_dump(mode="json", exclude_none=True),
@@ -39,7 +39,9 @@ class McpToolAdapter(BaseTool):
             return ToolResult(
                 output=str(exc), is_error=True, metadata={"client_error": reason} if reason else {}
             )
-        return ToolResult(output=output)
+        # The server's own flag: a tool that failed is a failed call, whatever
+        # its text says.
+        return ToolResult(output=output, is_error=is_error)
 
 
 _SDK_ERROR_REASONS = {
