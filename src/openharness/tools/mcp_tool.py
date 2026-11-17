@@ -32,7 +32,10 @@ class McpToolAdapter(BaseTool):
                 arguments.model_dump(mode="json", exclude_none=True),
             )
         except McpServerNotConnectedError as exc:
-            return ToolResult(output=str(exc), is_error=True)
+            # "origin": "client" marks an error this client built (no session,
+            # transport failure, call refused), as opposed to anything the tool
+            # returned. A host that verifies tool results can tell them apart.
+            return ToolResult(output=str(exc), is_error=True, metadata={"origin": "client"})
         return ToolResult(output=output)
 
 

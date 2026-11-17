@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -510,8 +511,28 @@ def _record_tool_carryover(
         _remember_work_log(context.tool_metadata, entry="Exited plan mode")
 
 
-def _tool_artifact_dir() -> Path:
-    artifact_dir = get_data_dir() / "tool_artifacts"
+# Artifact copies are folded so the file tools can page them. The width is set
+# from the inline limit so that one read_file page of a copy (200 lines by
+# default, each with an 8-char line-number prefix) stays under that limit;
+# otherwise reading the copy would itself be offloaded to another copy.
+_ARTIFACT_MAX_LINE_CHARS = 160
+_READ_FILE_PAGE_LINES = 200
+
+
+def _artifact_line_chars(inline_limit: int) -> int:
+    return max(20, min(_ARTIFACT_MAX_LINE_CHARS, inline_limit // _READ_FILE_PAGE_LINES - 10))
+
+
+def _tool_artifact_dir(tool_metadata: dict[str, object] | None = None) -> Path:
+    """Where offloaded tool output is written.
+
+    ``tool_metadata["tool_artifact_dir"]`` (set by an embedding host) wins over
+    the shared data dir: a host that confines the file tools to a per-run
+    folder points this inside that folder, so the model can read the copy and
+    the host's own cleanup removes it.
+    """
+    override = (tool_metadata or {}).get("tool_artifact_dir")
+    artifact_dir = Path(str(override)) if override else get_data_dir() / "tool_artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     return artifact_dir
 
@@ -521,21 +542,57 @@ def _safe_tool_artifact_name(tool_name: str) -> str:
     return (normalized or "tool")[:80]
 
 
+def _line_oriented(output: str, width: int) -> str:
+    """``output`` reshaped for tools that page by line (read_file, grep).
+
+    MCP results are usually one line of JSON, which read_file returns whole and
+    grep matches whole. JSON is pretty-printed, escaped newlines inside string
+    values start a new line, and any line still longer than ``width`` is cut.
+    Nothing is dropped.
+    """
+    text = output
+    if text.lstrip()[:1] in ("{", "["):
+        try:
+            text = json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+        except (ValueError, RecursionError):
+            pass
+    lines: list[str] = []
+    for line in text.replace("\\n", "\\n\n").splitlines():
+        if not line:
+            lines.append(line)
+        for start in range(0, len(line), width):
+            lines.append(line[start : start + width])
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
 def _offload_tool_output_if_needed(
     *,
     tool_name: str,
     tool_use_id: str,
     output: str,
-) -> tuple[str, Path | None]:
+    tool_metadata: dict[str, object] | None = None,
+    cwd: Path | None = None,
+) -> tuple[str, Path | None, str | None]:
+    """Return ``(inline text, saved copy or None, the copy's path as shown to the model)``."""
     inline_limit = tool_output_inline_chars()
     if len(output) <= inline_limit:
-        return output, None
+        return output, None, None
+    width = _artifact_line_chars(inline_limit)
 
     artifact_path = (
-        _tool_artifact_dir()
+        _tool_artifact_dir(tool_metadata)
         / f"{time.strftime('%Y%m%d-%H%M%S')}-{_safe_tool_artifact_name(tool_name)}-{uuid4().hex[:12]}.txt"
     )
-    artifact_path.write_text(output, encoding="utf-8", errors="replace")
+    artifact_path.write_text(_line_oriented(output, width), encoding="utf-8", errors="replace")
+    # A host that set the folder gets the path relative to cwd when the copy is
+    # inside it: that is the form its confined file tools take, and it keeps the
+    # host path out of the model's context.
+    shown_path = str(artifact_path)
+    if cwd is not None and (tool_metadata or {}).get("tool_artifact_dir"):
+        try:
+            shown_path = str(artifact_path.resolve().relative_to(Path(cwd).resolve()))
+        except ValueError:
+            pass
     preview = output[:tool_output_preview_chars()]
     omitted = max(0, len(output) - len(preview))
     inline = (
@@ -543,14 +600,16 @@ def _offload_tool_output_if_needed(
         f"Tool: {tool_name}\n"
         f"Tool use id: {tool_use_id}\n"
         f"Original size: {len(output)} chars\n"
-        f"Full output saved to: {artifact_path}\n"
+        f"Full output saved to: {shown_path}\n"
+        f"The saved copy is folded to {width}-char lines: page it with "
+        "read_file (offset, limit) or search it with grep.\n"
         f"Inline preview: first {len(preview)} chars"
     )
     if omitted:
         inline += f" ({omitted} chars omitted)"
     if preview:
         inline += f"\n\nPreview:\n{preview}"
-    return inline, artifact_path
+    return inline, artifact_path, shown_path
 
 
 # ---------------------------------------------------------------------------
@@ -1010,13 +1069,17 @@ async def _execute_tool_call(
     elapsed = time.monotonic() - t0
     log.debug("executed %s in %.2fs err=%s output_len=%d",
               tool_name, elapsed, result.is_error, len(result.output or ""))
-    inline_output, artifact_path = _offload_tool_output_if_needed(
+    inline_output, artifact_path, shown_artifact_path = _offload_tool_output_if_needed(
         tool_name=tool_name,
         tool_use_id=tool_use_id,
         output=result.output,
+        tool_metadata=context.tool_metadata,
+        cwd=context.cwd,
     )
     if artifact_path is not None:
-        _remember_active_artifact(context.tool_metadata, str(artifact_path))
+        # The shown path, not the host path: this list is written into the
+        # compaction summary the model reads.
+        _remember_active_artifact(context.tool_metadata, shown_artifact_path)
     tool_result = ToolResultBlock(
         tool_use_id=tool_use_id,
         content=inline_output,

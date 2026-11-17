@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterator
 
 from openharness.api.client import SupportsStreamingMessages
 from openharness.engine.cost_tracker import CostTracker
 from openharness.coordinator.coordinator_mode import get_coordinator_user_context
 from openharness.engine.messages import ConversationMessage, TextBlock, ToolResultBlock, sanitize_conversation_messages
-from openharness.engine.query import AskUserPrompt, PermissionPrompt, QueryContext, remember_user_goal, run_query
+from openharness.engine.query import (
+    AskUserPrompt,
+    MaxTurnsExceeded,
+    PermissionPrompt,
+    QueryContext,
+    remember_user_goal,
+    run_query,
+)
 from openharness.engine.stream_events import AssistantTurnComplete, StreamEvent
 from openharness.config.settings import Settings
 from openharness.hooks import HookEvent, HookExecutor
@@ -250,6 +258,22 @@ class QueryEngine:
             return bool(msg.tool_uses)
         return False
 
+    @contextmanager
+    def tools_disabled(self, *, max_turns: int = 1) -> Iterator[None]:
+        """Run ``submit_message`` calls inside the block with no tools.
+
+        The model is sent no tool schemas, so it can only answer in text, and
+        the loop is capped at ``max_turns``. Used after ``MaxTurnsExceeded`` to
+        get an answer from the results already in history. The registry and the
+        turn cap are restored on exit.
+        """
+        saved = (self._tool_registry, self._max_turns)
+        self._tool_registry, self._max_turns = ToolRegistry(), max_turns
+        try:
+            yield
+        finally:
+            self._tool_registry, self._max_turns = saved
+
     @_serialized_turn
     async def submit_message(self, prompt: str | ConversationMessage) -> AsyncIterator[StreamEvent]:
         """Append a user message and execute the query loop."""
@@ -299,6 +323,13 @@ class QueryEngine:
                 if usage is not None:
                     self._cost_tracker.add(usage)
                 yield event
+        except MaxTurnsExceeded:
+            # History is otherwise saved only at each AssistantTurnComplete, which
+            # comes before that turn's tools run. Keep the last round's tool
+            # results too, so a follow-up message (for example a tools-off turn
+            # that writes the answer) has them.
+            self._messages = list(query_messages)
+            raise
         finally:
             await self._update_session_memory()
             await self._extract_durable_memories()

@@ -7,8 +7,12 @@ import os
 
 log = logging.getLogger(__name__)
 
-DEFAULT_TOOL_OUTPUT_INLINE_CHARS = 16_000
-DEFAULT_TOOL_OUTPUT_PREVIEW_CHARS = 3_000
+# 40,000 / 8,000 since 2026-11-17 (were 16,000 / 3,000): over 30 days of
+# investigations a third of knowledge-article reads (20K to 32K chars) reached
+# the model as a 3,000-char preview. A result over the inline limit is still
+# saved whole and previewed.
+DEFAULT_TOOL_OUTPUT_INLINE_CHARS = 40_000
+DEFAULT_TOOL_OUTPUT_PREVIEW_CHARS = 8_000
 DEFAULT_MICROCOMPACT_TOOL_RESULT_CHARS = 4_000
 
 
